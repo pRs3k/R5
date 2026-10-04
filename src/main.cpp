@@ -50,8 +50,28 @@ static const std::array<ColorScheme, 11> kColorSchemes = {{
 // display-mode attach: avoids an actual monitor mode switch, which is a
 // known trigger for freezes/crashes when overlay software (Discord,
 // GeForce Experience, RTSS, Game Bar, etc.) hooks the transition.
+//
+// Except on Wayland, where that trick can't work at all: clients aren't
+// allowed to position their own windows (glfwSetWindowPos is an error
+// there), so a borderless window just stays wherever the compositor put
+// it. Wayland fullscreen is a request to the compositor and never changes
+// the display mode, so glfwSetWindowMonitor carries none of the
+// mode-switch risk above and is the right call there.
 static void toggleFullscreen(GLFWwindow* window, bool& isFullscreen,
                               int& windowedX, int& windowedY, int& windowedW, int& windowedH) {
+    if (glfwGetPlatform() == GLFW_PLATFORM_WAYLAND) {
+        if (!isFullscreen) {
+            glfwGetWindowSize(window, &windowedW, &windowedH);
+            GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+            const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+            glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+        } else {
+            glfwSetWindowMonitor(window, nullptr, 0, 0, windowedW, windowedH, GLFW_DONT_CARE);
+        }
+        isFullscreen = !isFullscreen;
+        return;
+    }
+
     if (!isFullscreen) {
         glfwGetWindowPos(window, &windowedX, &windowedY);
         glfwGetWindowSize(window, &windowedW, &windowedH);
@@ -71,7 +91,7 @@ static void toggleFullscreen(GLFWwindow* window, bool& isFullscreen,
     }
 }
 
-static const char* kVertexShaderSrc = R"(#version 450 core
+static const char* kVertexShaderSrc = R"(#version 410 core
 const vec2 kPositions[3] = vec2[3](
     vec2(-1.0, -1.0),
     vec2( 3.0, -1.0),
@@ -296,7 +316,12 @@ static int runApp() {
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init("#version 450 core");
+    // Must match the 4.1 context requested above (as every .frag in
+    // shaders/ already does). Asking for GLSL 4.50 under a 4.1 request
+    // only works where the driver happens to hand back a newer context
+    // than asked for -- usual on Windows and Mesa, but not guaranteed on
+    // older Linux GPUs/drivers, and never on macOS.
+    ImGui_ImplOpenGL3_Init("#version 410 core");
 
     bool isFullscreen = false;
     int windowedX = 100, windowedY = 100, windowedW = 1280, windowedH = 720;

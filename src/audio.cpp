@@ -3,7 +3,8 @@
 // only to the AudioCapture interface (audio_capture.h) for actual samples,
 // never to a platform audio API directly -- this file is identical on
 // every platform; only the capture backend it's built against differs
-// (see audio_capture_win.cpp, selected by CMakeLists.txt).
+// (see audio_capture_win.cpp / audio_capture_linux.cpp, selected by
+// CMakeLists.txt).
 
 #include "audio.h"
 #include "audio_capture.h"
@@ -125,7 +126,8 @@ void AudioAnalyzer::update() {
     // If we're not ready at all (initial device-open failed, or a previous
     // reopen attempt failed), keep retrying here rather than giving up
     // permanently -- the capture backend owns whatever internal state
-    // never gets torn down (e.g. WASAPI's device enumerator), so there's
+    // never gets torn down (e.g. WASAPI's device enumerator, PulseAudio's
+    // mainloop thread), so there's
     // always something to retry against.
     if (s.clock - s.lastDeviceCheckTime > Impl::kDeviceCheckInterval) {
         s.lastDeviceCheckTime = s.clock;

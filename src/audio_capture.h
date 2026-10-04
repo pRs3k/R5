@@ -6,7 +6,7 @@
 
 // Grabs raw interleaved float PCM from the system's current audio output
 // (loopback capture) and reports basic device status. Implemented once per
-// platform (audio_capture_win.cpp today; audio_capture_mac.mm later, for
+// platform (audio_capture_win.cpp, audio_capture_linux.cpp; audio_capture_mac.mm later, for
 // whichever of BlackHole+CoreAudio or ScreenCaptureKit gets chosen) --
 // the shared analysis pipeline in audio.cpp only ever talks to this
 // interface, never to a platform audio API directly. Keeping this surface
@@ -45,5 +45,6 @@ public:
 };
 
 // Constructs the platform's capture backend. Implemented once per platform
-// (audio_capture_win.cpp / audio_capture_mac.mm), selected by CMakeLists.txt.
+// (audio_capture_win.cpp / audio_capture_linux.cpp / audio_capture_mac.mm),
+// selected by CMakeLists.txt.
 std::unique_ptr<AudioCapture> createAudioCapture();

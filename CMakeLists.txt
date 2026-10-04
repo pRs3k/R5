@@ -11,6 +11,42 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 
+# GLFW 3.4 builds both its X11 and Wayland backends on Linux by default and
+# picks one at runtime, but hard-fails configure if either one's dev
+# packages are missing. Enable each only when its packages are actually
+# present (unless already set explicitly with -DGLFW_BUILD_X11/WAYLAND=...),
+# so a box with just one of the two still builds.
+if (UNIX AND NOT APPLE)
+    find_package(PkgConfig REQUIRED)
+    if (NOT DEFINED GLFW_BUILD_WAYLAND)
+        pkg_check_modules(R5_WAYLAND QUIET wayland-client wayland-cursor wayland-egl xkbcommon wayland-protocols)
+        find_program(R5_WAYLAND_SCANNER wayland-scanner)
+        if (R5_WAYLAND_FOUND AND R5_WAYLAND_SCANNER)
+            set(GLFW_BUILD_WAYLAND ON CACHE BOOL "")
+        else()
+            message(STATUS "R5: Wayland dev packages not found, building GLFW without Wayland")
+            set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "")
+        endif()
+    endif()
+    if (NOT DEFINED GLFW_BUILD_X11)
+        find_package(X11 QUIET)
+        if (X11_FOUND AND X11_Xrandr_INCLUDE_PATH AND X11_Xinerama_INCLUDE_PATH AND X11_Xkb_INCLUDE_PATH
+                AND X11_Xcursor_INCLUDE_PATH AND X11_Xi_INCLUDE_PATH AND X11_Xshape_INCLUDE_PATH)
+            set(GLFW_BUILD_X11 ON CACHE BOOL "")
+        else()
+            message(STATUS "R5: X11 dev packages not found, building GLFW without X11")
+            set(GLFW_BUILD_X11 OFF CACHE BOOL "")
+        endif()
+    endif()
+    if (NOT GLFW_BUILD_WAYLAND AND NOT GLFW_BUILD_X11)
+        message(FATAL_ERROR "R5: neither X11 nor Wayland dev packages found. Debian/Ubuntu: "
+            "libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev "
+            "and/or libwayland-dev wayland-protocols libxkbcommon-dev. Fedora: "
+            "libX11-devel libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel libXext-devel "
+            "and/or wayland-devel wayland-protocols-devel libxkbcommon-devel.")
+    endif()
+endif()
+
 FetchContent_Declare(
     glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
@@ -78,6 +114,13 @@ elseif (APPLE)
     # needs Screen Recording permission). Not yet written.
     target_link_libraries(R5 PRIVATE
         "-framework Cocoa" "-framework OpenGL" "-framework IOKit" "-framework CoreVideo")
+else()
+    # PulseAudio client API -- also what PipeWire desktops expose via
+    # pipewire-pulse, so this one backend covers both. Build dep:
+    # libpulse-dev (Debian/Ubuntu) / pulseaudio-libs-devel (Fedora).
+    pkg_check_modules(PULSE REQUIRED IMPORTED_TARGET libpulse)
+    target_sources(R5 PRIVATE src/audio_capture_linux.cpp)
+    target_link_libraries(R5 PRIVATE PkgConfig::PULSE)
 endif()
 
 target_compile_definitions(R5 PRIVATE
@@ -86,4 +129,6 @@ target_compile_definitions(R5 PRIVATE
 
 if (MSVC)
     target_compile_options(R5 PRIVATE /W4)
+else()
+    target_compile_options(R5 PRIVATE -Wall -Wextra)
 endif()

@@ -8,7 +8,8 @@ public:
     AudioAnalyzer(const AudioAnalyzer&) = delete;
     AudioAnalyzer& operator=(const AudioAnalyzer&) = delete;
 
-    // Starts WASAPI loopback capture on the default render device.
+    // Starts loopback capture of the default output device (WASAPI on
+    // Windows, PulseAudio/PipeWire monitor source on Linux).
     // Returns false on failure; the analyzer stays usable (values read 0).
     bool init();
 
