@@ -46,6 +46,19 @@ static const std::array<ColorScheme, 11> kColorSchemes = {{
     {"Rainbow",       {{1.00f, 0.20f, 0.20f}, {1.00f, 0.90f, 0.20f}, {0.20f, 1.00f, 0.55f}, {0.45f, 0.25f, 1.00f}}},
 }};
 
+// Post-processing "look" controls, exposed live in Settings > Look. The
+// defaults are the tuned look; every slider maps straight onto a uniform in
+// composite.frag / scene.frag, so nothing here is baked into the shaders.
+struct LookSettings {
+    float sharpen = 0.35f;     // post-downsample contrast-adaptive sharpen
+    float dof = 0.3f;          // depth-of-field strength on the far background
+    float aberration = 1.0f;   // edge colour fringe
+    float bloom = 0.22f;       // bloom mix strength
+    float grain = 0.012f;      // film grain amplitude
+    float saturation = 1.15f;  // 1 = neutral
+    float background = 1.0f;   // nebula/gas backdrop brightness
+};
+
 // Borderless windowed fullscreen rather than glfwSetWindowMonitor's real
 // display-mode attach: avoids an actual monitor mode switch, which is a
 // known trigger for freezes/crashes when overlay software (Discord,
@@ -327,6 +340,7 @@ static int runApp() {
     int windowedX = 100, windowedY = 100, windowedW = 1280, windowedH = 720;
     bool showSettings = false;
     int colorSchemeIndex = 0;
+    LookSettings look;
 
     // Render-resolution quality presets, exposed in Settings so people on
     // less powerful GPUs can turn it down instead of eating a fixed cost.
@@ -375,6 +389,7 @@ static int runApp() {
     GLint sceneLocWorldBlend = glGetUniformLocation(sceneShader.program, "iWorldBlend");
     GLint sceneLocTunnelTravel = glGetUniformLocation(sceneShader.program, "iTunnelTravel");
     GLint sceneLocOrbitTime = glGetUniformLocation(sceneShader.program, "iOrbitTime");
+    GLint sceneLocBackground = glGetUniformLocation(sceneShader.program, "uBackground");
 
     GLint brightLocThreshold = glGetUniformLocation(brightProgram, "uThreshold");
 
@@ -398,6 +413,12 @@ static int runApp() {
     GLint compLocDofTex = glGetUniformLocation(compositeProgram, "uDofBlur");
     GLint compLocExposure = glGetUniformLocation(compositeProgram, "uExposure");
     GLint compLocPortalProgress = glGetUniformLocation(compositeProgram, "uPortalProgress");
+    GLint compLocDofAmount = glGetUniformLocation(compositeProgram, "uDofAmount");
+    GLint compLocAberration = glGetUniformLocation(compositeProgram, "uAberration");
+    GLint compLocBloomStrength = glGetUniformLocation(compositeProgram, "uBloomStrength");
+    GLint compLocGrain = glGetUniformLocation(compositeProgram, "uGrain");
+    GLint compLocSharpen = glGetUniformLocation(compositeProgram, "uSharpen");
+    GLint compLocSaturation = glGetUniformLocation(compositeProgram, "uSaturation");
 
     Framebuffer sceneFB, brightFB, blurFB[2], dofBlurFB[2], bloomAccumFB;
     int fbWidth = 0, fbHeight = 0;
@@ -410,11 +431,14 @@ static int runApp() {
     // bright-pass's own hard edges. Weights fall off so the core still
     // reads as the dominant, brightest layer.
     struct BloomScale { float texelStep; float lod; float weight; };
+    // Wide scales trimmed (were 0.32/0.16): their bleed reaches far past
+    // the light source and was a big part of the low-contrast haze laid
+    // over the whole frame.
     constexpr BloomScale kBloomScales[] = {
         {0.75f, 0.0f, 1.0f},
-        {1.5f,  1.0f, 0.6f},
-        {3.0f,  2.0f, 0.32f},
-        {6.0f,  3.0f, 0.16f},
+        {1.5f,  1.0f, 0.55f},
+        {3.0f,  2.0f, 0.18f},
+        {6.0f,  3.0f, 0.06f},
     };
 
     AudioAnalyzer audio;
@@ -576,6 +600,17 @@ static int runApp() {
                     }
                 }
                 ImGui::TextDisabled("Lower this if the app runs slow");
+
+                ImGui::Separator();
+                ImGui::Text("Look");
+                ImGui::SliderFloat("Sharpen", &look.sharpen, 0.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Depth of field", &look.dof, 0.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Lens fringe", &look.aberration, 0.0f, 2.0f, "%.2f");
+                ImGui::SliderFloat("Bloom", &look.bloom, 0.0f, 0.6f, "%.2f");
+                ImGui::SliderFloat("Grain", &look.grain, 0.0f, 0.05f, "%.3f");
+                ImGui::SliderFloat("Saturation", &look.saturation, 0.5f, 1.6f, "%.2f");
+                ImGui::SliderFloat("Background", &look.background, 0.0f, 2.0f, "%.2f");
+                if (ImGui::Button("Reset look")) look = LookSettings{};
                 ImGui::End();
             }
         }
@@ -599,6 +634,7 @@ static int runApp() {
                 sceneLocWorldBlend = glGetUniformLocation(sceneShader.program, "iWorldBlend");
                 sceneLocTunnelTravel = glGetUniformLocation(sceneShader.program, "iTunnelTravel");
                 sceneLocOrbitTime = glGetUniformLocation(sceneShader.program, "iOrbitTime");
+                sceneLocBackground = glGetUniformLocation(sceneShader.program, "uBackground");
             }
         }
 
@@ -823,6 +859,7 @@ static int runApp() {
         if (sceneLocWorldBlend >= 0) glUniform1f(sceneLocWorldBlend, worldBlend);
         if (sceneLocTunnelTravel >= 0) glUniform1f(sceneLocTunnelTravel, tunnelTravel);
         if (sceneLocOrbitTime >= 0) glUniform1f(sceneLocOrbitTime, orbitTime);
+        if (sceneLocBackground >= 0) glUniform1f(sceneLocBackground, look.background);
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
         // Mip chain for sceneFB, regenerated every frame since its content
@@ -838,7 +875,9 @@ static int runApp() {
         glUseProgram(brightProgram);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, sceneFB.colorTex);
-        if (brightLocThreshold >= 0) glUniform1f(brightLocThreshold, 1.4f);
+        // Raised from 1.4 so only genuinely hot pixels (vein cores, bolts,
+        // highlights) bloom, rather than every moderately bright surface.
+        if (brightLocThreshold >= 0) glUniform1f(brightLocThreshold, 1.8f);
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
         // Mip chain for brightFB, regenerated every frame — each bloom
@@ -949,6 +988,12 @@ static int runApp() {
         if (compLocAudioSlow >= 0) glUniform4f(compLocAudioSlow, bassSlow, midSlow, trebleSlow, bigAccent);
         if (compLocExposure >= 0) glUniform1f(compLocExposure, exposure);
         if (compLocPortalProgress >= 0) glUniform1f(compLocPortalProgress, portalProgress);
+        if (compLocDofAmount >= 0) glUniform1f(compLocDofAmount, look.dof);
+        if (compLocAberration >= 0) glUniform1f(compLocAberration, look.aberration);
+        if (compLocBloomStrength >= 0) glUniform1f(compLocBloomStrength, look.bloom);
+        if (compLocGrain >= 0) glUniform1f(compLocGrain, look.grain);
+        if (compLocSharpen >= 0) glUniform1f(compLocSharpen, look.sharpen);
+        if (compLocSaturation >= 0) glUniform1f(compLocSaturation, look.saturation);
         if (compLocColorA >= 0) glUniform3f(compLocColorA, scheme.colors[0][0], scheme.colors[0][1], scheme.colors[0][2]);
         if (compLocColorB >= 0) glUniform3f(compLocColorB, scheme.colors[1][0], scheme.colors[1][1], scheme.colors[1][2]);
         if (compLocSpectrum >= 0) glUniform1fv(compLocSpectrum, AudioAnalyzer::kSpectrumBands, audio.spectrum());

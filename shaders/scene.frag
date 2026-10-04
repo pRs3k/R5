@@ -14,6 +14,7 @@ uniform float iPortalProgress; // 0..1 through the current/most recent portal fl
 uniform float iDimension;      // 0 or 1: which world is active — donut/orb, or the tunnel. Hard cut, hidden by the flash.
 uniform float iWorldBlend;     // 0 = normal orbiting camera, 1 = locked to the tunnel axis; eases toward iDimension's target
 uniform float iTunnelTravel;   // distance flown down the tunnel since the most recent entry (resets each trigger)
+uniform float uBackground;     // Settings > Look: brightness of the nebula/gas backdrop (1 = default)
 uniform float iOrbitTime;      // eased clock for the normal-mode orbit camera; freezes in lockstep with the axis (see ringRotation) so the frozen-axis "side" pick never flips mid-flight
 
 out vec4 fragColor; // HDR linear, may exceed 1.0 (bloom pass reads this)
@@ -447,12 +448,16 @@ vec3 nebula(vec2 uv, float travel) {
     float scale = mix(1.4, 2.4, iDimension);
     vec2 p = uv * scale + vec2(travel * 0.015, sin(travel * 0.05) * 0.2);
     float n = fbm(p + fbm(p * 1.7) * 0.6);
-    n = smoothstep(mix(0.35, 0.20, iDimension), 0.85, n);
+    // Higher threshold plus a squared falloff: clouds keep bright cores
+    // but thin out into genuinely black space between them. The old ramp
+    // (from 0.35, linear) tinted ~60% of the screen at a fairly even mid
+    // level, which is what left no true blacks anywhere in the frame and
+    // read as a milky veil over everything. Peak brightness is kept close
+    // to before so the clouds still hold their own against the foreground.
+    n = smoothstep(mix(0.45, 0.32, iDimension), 0.9, n);
+    n *= n;
     vec3 col = paletteColor(fbm(p * 0.6 + 5.0));
-    // Boosted from 0.22 — at the old brightness the nebula had almost no
-    // presence against a busy foreground (bolts/particles/bloom) and only
-    // read clearly once everything else calmed down.
-    return col * n * mix(0.42, 0.58, iDimension);
+    return col * n * mix(0.5, 0.65, iDimension) * uBackground;
 }
 
 // Concentric rings receding via a log-polar scroll: the classic stateless
@@ -462,9 +467,15 @@ vec3 nebula(vec2 uv, float travel) {
 vec3 tunnelRings(vec2 uv, float travel, float spacing, float speed, float opacity) {
     float r = length(uv) + 1e-4;
     float logR = log(r);
-    float phase = fract(logR * spacing - travel * speed);
+    float rawPhase = logR * spacing - travel * speed;
+    float phase = fract(rawPhase);
     float d = min(phase, 1.0 - phase);
-    float ring = smoothstep(0.025, 0.0, d);
+    // Antialiased to about one pixel via fwidth rather than a fixed 0.025
+    // phase ramp, which smeared each ring wider (in pixels) the farther
+    // out it sat, since log-radius compresses toward the edge. fwidth of
+    // the unwrapped phase: fract() jumps by 1 exactly on the ring line.
+    float aa = fwidth(rawPhase) * 1.5;
+    float ring = 1.0 - smoothstep(0.004, 0.004 + aa, d);
     float fadeIn = smoothstep(0.0, 1.5, r);
     float fadeOut = 1.0 - smoothstep(3.0, 5.0, r);
     return paletteColor(logR * 0.3) * ring * fadeIn * fadeOut * opacity;
@@ -494,7 +505,7 @@ vec4 ambientFog(vec2 uv, float travel, float bassSlow) {
     float glow = smoothstep(mix(0.7, 0.5, iDimension), 0.94, n) * edgeFade;
     float dust = smoothstep(mix(0.42, 0.55, iDimension), 0.12, n) * edgeFade;
 
-    vec3 glowColor = paletteColor(travel * 0.01 + n * 0.5) * glow * (mix(0.3, 0.48, iDimension) + bassSlow * 0.25);
+    vec3 glowColor = paletteColor(travel * 0.01 + n * 0.5) * glow * (mix(0.3, 0.48, iDimension) + bassSlow * 0.25) * uBackground;
     float dustAmount = dust * 0.55;
     return vec4(glowColor, dustAmount);
 }
@@ -523,7 +534,10 @@ vec3 starField(vec2 uv, float travel, float speed) {
         if (h > mix(0.88, 0.76, iDimension)) {
             float colorMix = hash21(id + fi * 7.0 + 3.7);
             float distMetric = length(vec2(gv.x, gv.y / streak));
-            float star = smoothstep(0.22, 0.0, distMetric);
+            // Sharp core plus a faint short glow, rather than one soft blob
+            // 22% of a cell wide: cells grow with radius (log-polar), so
+            // near the screen edge that blob was a big out-of-focus oval.
+            float star = smoothstep(0.09, 0.03, distMetric) * 1.3 + exp(-distMetric * 14.0) * 0.2;
             float twinkle = 0.6 + 0.4 * sin(h * 250.0 + iTime * 3.0);
             float fadeIn = smoothstep(0.0, 2.0, r);
             col += star * twinkle * fadeIn * paletteColor(colorMix) * 1.3;
@@ -588,11 +602,17 @@ vec3 shockwaves(vec2 uv, vec3 ages) {
         float age = agesArr[i];
         if (age > 1.4) continue;
         float radius = age * 1.9;
-        float thickness = mix(0.05, 0.012, clamp(age / 1.4, 0.0, 1.0));
         float d = abs(length(uv) - radius);
-        float ring = smoothstep(thickness, 0.0, d);
+        // Thin bright core (a few pixels, antialiased) plus a short, dim
+        // exponential glow. This used to be one soft band up to 0.05 uv
+        // wide -- ~35px at 720p, as wide as the donut's tube -- which was
+        // the big blurry ring sweeping across the frame on every beat.
+        float px = 1.0 / iResolution.y;
+        float coreW = mix(3.0, 1.2, clamp(age / 1.4, 0.0, 1.0)) * px;
+        float core = 1.0 - smoothstep(coreW, coreW + 1.5 * px, d);
+        float halo = exp(-d / (coreW * 4.0)) * 0.25;
         float fade = 1.0 - age / 1.4;
-        col += ring * fade * fade * paletteColor(clamp(age / 1.4, 0.0, 1.0)) * 1.6;
+        col += (core + halo) * fade * fade * paletteColor(clamp(age / 1.4, 0.0, 1.0)) * 1.6;
     }
     return col;
 }
@@ -1157,7 +1177,10 @@ void main() {
     // Faded via worldBlend like those other layers rather than gated
     // strictly on iDimension, so they still ease out smoothly through
     // the approach instead of popping off at the hard cut.
-    col += onset * vec3(1.0, 0.9, 0.8) * 0.15 * bgFade;
+    // Kept small: this is a flat lift over every pixel on every beat, so
+    // at the old 0.15 it washed the whole frame toward grey in time with
+    // the music rather than reading as a flash.
+    col += onset * vec3(1.0, 0.9, 0.8) * 0.04 * bgFade;
     col += shockwaves(uv, iShockwave) * bgFade;
 
     // Alpha carries depth for the composite pass's depth-of-field blend, with

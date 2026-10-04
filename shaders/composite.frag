@@ -13,6 +13,16 @@ uniform float uSpectrum[16];
 uniform float uExposure; // host-computed auto-exposure, eases with audio energy over time
 uniform float uPortalProgress; // 0..1 through a portal fly-through; drives the blackout/blur at closest approach
 
+// Look controls, driven from Settings > Look (main.cpp's LookSettings holds
+// the defaults). Every soft/hazy post effect is scaled by one of these so
+// the overall crispness can be tuned live instead of by editing constants.
+uniform float uDofAmount;    // 0 = no depth of field, 1 = full background blur
+uniform float uAberration;   // lens colour fringe strength (edges only)
+uniform float uBloomStrength;
+uniform float uGrain;
+uniform float uSharpen;      // post-downsample sharpening, 0 = off
+uniform float uSaturation;   // 1 = neutral
+
 out vec4 fragColor;
 
 float hash21(vec2 p) {
@@ -26,27 +36,35 @@ vec3 acesFilmic(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
-// Spectral lens dispersion: instead of a single R/B channel split, march a
-// handful of taps along the radial direction, each carrying a slice of the
-// visible spectrum (blue pulled toward center, red flung outward), and
-// recombine weighted by a rough eye response. Gives a soft rainbow fringe
-// that behaves like real glass rather than a hard 3-colour ghost.
-vec3 spectralAberration(sampler2D tex, vec2 uv, vec2 dir, float amount) {
-    const int kCASamples = 8;
-    vec3 sum = vec3(0.0);
-    vec3 wsum = vec3(0.0);
-    for (int i = 0; i < kCASamples; ++i) {
-        float t = float(i) / float(kCASamples - 1);
-        vec3 w = vec3(
-            smoothstep(0.35, 1.0, t),          // red weight rises toward the outward taps
-            1.0 - abs(t - 0.5) * 2.0,           // green peaks in the middle
-            smoothstep(0.65, 0.0, t)            // blue weight rises toward the inward taps
-        );
-        float shift = mix(-amount, amount, t);
-        sum += texture(tex, uv + dir * shift).rgb * w;
-        wsum += w;
-    }
-    return sum / max(wsum, vec3(1e-4));
+// Lens colour fringe: one tap per channel (red pushed outward, blue pulled
+// inward, green untouched). This used to be an 8-tap spectral march, which
+// looked smooth in isolation but was really a radial blur -- every pixel
+// was the average of 8 samples spread along the radius, up to ~25px apart
+// near the edges on beats. Three distinct taps give a crisp fringe on
+// contrasty edges and leave flat areas and fine detail untouched.
+vec3 lensFringe(sampler2D tex, vec2 uv, vec2 dir, float amount, vec3 center) {
+    if (amount < 1e-5) return center;
+    return vec3(texture(tex, uv + dir * amount).r,
+                center.g,
+                texture(tex, uv - dir * amount).b);
+}
+
+// Contrast-adaptive sharpen (in the spirit of AMD's CAS) on the
+// downsampled scene: pushes each pixel away from its 4 neighbours, then
+// clamps to their min/max so bright HDR edges can't ring or halo. The
+// supersampled scene is minified with trilinear filtering on the way to
+// native resolution, which softens a little; this wins that back.
+vec3 sharpenedScene(vec2 uv, vec2 px) {
+    vec3 center = texture(uScene, uv).rgb;
+    if (uSharpen <= 0.0) return center;
+    vec3 n = texture(uScene, uv + vec2(0.0, px.y)).rgb;
+    vec3 s = texture(uScene, uv - vec2(0.0, px.y)).rgb;
+    vec3 e = texture(uScene, uv + vec2(px.x, 0.0)).rgb;
+    vec3 w = texture(uScene, uv - vec2(px.x, 0.0)).rgb;
+    vec3 lo = min(center, min(min(n, s), min(e, w)));
+    vec3 hi = max(center, max(max(n, s), max(e, w)));
+    vec3 sharp = center + (center - (n + s + e + w) * 0.25) * uSharpen * 2.0;
+    return clamp(sharp, lo, hi);
 }
 
 vec3 zoomBlurSample(sampler2D tex, vec2 uv, vec2 center, float strength) {
@@ -86,7 +104,10 @@ vec3 radialSpectrum(vec2 fragPx, vec2 res) {
 
 void main() {
     float bigAccent = iAudioSlow.w;
-    float zoomStrength = smoothstep(0.60, 1.7, bigAccent);
+    // Only the genuinely huge accents (the top of bigAccent's 0..2 range)
+    // zoom-blur now; from 0.6 up it was smearing the whole frame on most
+    // ordinary big hits.
+    float zoomStrength = smoothstep(1.2, 1.9, bigAccent);
 
     // Portal fly-through: the geometry hard-switches from donut/orb to
     // tunnel at kPortalCutPoint (main.cpp, mirrored here as a literal —
@@ -113,12 +134,16 @@ void main() {
     // always-on effect: near-zero at the frame centre so the hero subject
     // reads clean, ramping past the edges, and pumped by the fast onset
     // pulse plus bass and big accents so hits fringe without adding brightness.
+    // Fringe only past the inner ~35% radius (none at all over the
+    // subject), and an order of magnitude smaller than before: 0.006 UV max
+    // (~6px at 1080p, at the far corners, on a hit) vs. 0.02.
     vec2 caDir = distFromCenter > 1e-4 ? centered / distFromCenter : vec2(0.0);
-    float caEdge = pow(clamp(distFromCenter * 1.9, 0.0, 1.6), 1.5);
-    float caPulse = 0.0014 + iAudio.w * 0.0026 + iAudio.x * 0.0018 + bigAccent * 0.0012;
-    float caAmount = min(caPulse * caEdge, 0.02);
+    float caEdge = smoothstep(0.35, 0.8, distFromCenter);
+    float caPulse = 0.0016 + iAudio.w * 0.0016 + iAudio.x * 0.0010 + bigAccent * 0.0008;
+    float caAmount = min(caPulse * caEdge * uAberration, 0.006);
 
-    vec3 sharpScene = spectralAberration(uScene, uv, caDir, caAmount);
+    vec3 sharpScene = sharpenedScene(uv, 1.0 / iResolution);
+    sharpScene = lensFringe(uScene, uv, caDir, caAmount, sharpScene);
 
     vec3 blurredScene = zoomBlurSample(uScene, uv, vec2(0.5), zoomStrength);
     vec3 scene = mix(sharpScene, blurredScene, zoomStrength * 0.85);
@@ -138,15 +163,19 @@ void main() {
     const float kFocusDepth = 4.0;
     float pixelDepth = texture(uScene, uv).a;
     float distPastFocus = max(0.0, pixelDepth - kFocusDepth);
-    float coc = pixelDepth < 0.0 ? 0.0 : smoothstep(0.0, 6.0, distPastFocus);
+    float coc = pixelDepth < 0.0 ? 0.0 : smoothstep(0.0, 6.0, distPastFocus) * uDofAmount;
     scene = mix(scene, texture(uDofBlur, uv).rgb, coc);
 
     vec3 bloom = texture(uBloom, uv).rgb;
 
-    vec3 col = scene + bloom * 0.35;
+    vec3 col = scene + bloom * uBloomStrength;
 
-    float vignette = smoothstep(0.9, 0.25, distFromCenter);
-    col *= mix(0.55, 1.0, vignette);
+    // Saturation in linear light, before the tonemap compresses it.
+    float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    col = max(mix(vec3(luma), col, uSaturation), 0.0);
+
+    float vignette = smoothstep(0.95, 0.3, distFromCenter);
+    col *= mix(0.65, 1.0, vignette);
 
     // Pre-tonemap so the fade genuinely bottoms out at black rather than
     // ACES rolling a dimmed-but-still-colorful signal back up.
@@ -155,7 +184,7 @@ void main() {
     col = acesFilmic(col * 0.85 * uExposure);
     col = pow(col, vec3(1.0 / 2.2));
 
-    float grain = (hash21(gl_FragCoord.xy + fract(iTime) * 100.0) - 0.5) * 0.035;
+    float grain = (hash21(gl_FragCoord.xy + fract(iTime) * 100.0) - 0.5) * uGrain;
     col += grain;
 
     // radialSpectrum() is kept for a future spectrum-ring preset, not used here.
