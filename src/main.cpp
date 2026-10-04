@@ -510,9 +510,17 @@ static int runApp() {
         // ("Forgot to call Render() or EndFrame()...") and abort() the
         // whole process. Bailing out here instead means we never open an
         // ImGui frame we're not going to close.
+        //
+        // Waits rather than looping straight back to glfwPollEvents(): with
+        // no buffer swap there's no vsync to throttle the loop, so a bare
+        // `continue` spun a full CPU core for as long as the window stayed
+        // minimized.
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
-        if (w == 0 || h == 0) continue;
+        if (w == 0 || h == 0) {
+            glfwWaitEventsTimeout(0.1);
+            continue;
+        }
 
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);

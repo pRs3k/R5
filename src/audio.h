@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 class AudioAnalyzer {
 public:
     AudioAnalyzer();
@@ -47,7 +49,7 @@ public:
 
 private:
     struct Impl;
-    Impl* impl_ = nullptr;
+    std::unique_ptr<Impl> impl_;
 
     float bass_ = 0.0f;
     float mid_ = 0.0f;

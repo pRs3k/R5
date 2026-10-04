@@ -93,11 +93,17 @@ struct AudioAnalyzer::Impl {
     ~Impl() {
         if (fftCfg) kiss_fftr_free(fftCfg);
     }
+
+    // Owns fftCfg (freed above); a copy would double-free it.
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
 };
 
-AudioAnalyzer::AudioAnalyzer() : impl_(new Impl()) {}
+AudioAnalyzer::AudioAnalyzer() : impl_(std::make_unique<Impl>()) {}
 
-AudioAnalyzer::~AudioAnalyzer() { delete impl_; }
+// Defined here, not defaulted in the header, so unique_ptr<Impl> sees the
+// complete Impl type when it generates the delete.
+AudioAnalyzer::~AudioAnalyzer() = default;
 
 bool AudioAnalyzer::init() {
     Impl& s = *impl_;

@@ -15,7 +15,14 @@
 // detection) lives once in audio.cpp and never needs touching per platform.
 class AudioCapture {
 public:
+    AudioCapture() = default;
     virtual ~AudioCapture() = default;
+
+    // Every backend owns raw OS handles (COM interfaces, a PulseAudio
+    // mainloop thread) released in its destructor, so a copy would
+    // double-free them. Deleted here once rather than in each backend.
+    AudioCapture(const AudioCapture&) = delete;
+    AudioCapture& operator=(const AudioCapture&) = delete;
 
     // (Re)opens capture on the current default output device. Safe to call
     // repeatedly -- always tears down any prior capture first. Returns
